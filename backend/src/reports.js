@@ -108,7 +108,7 @@ reports.get("/admin/daily-activity", roles("admin"), async (req, res) => {
       [p.start, p.end],
     ),
     active = await one(
-      "SELECT count(*)::int AS total FROM listings WHERE status='active'",
+      "SELECT count(*)::int AS total FROM listings WHERE status='approved'",
     ),
     flags = await one(
       "SELECT count(*)::int AS total FROM audit_logs WHERE action='listing.flagged' AND created_at >= $1 AND created_at < $2",
@@ -146,4 +146,62 @@ reports.get("/admin/monthly-audit", roles("admin"), async (req, res) => {
       JSON.stringify(d.metadata),
     ]),
   ]);
+});
+
+reports.get("/seller/:kind/:format", roles("seller"), async (req, res) => {
+  const { kind, format } = req.params;
+  if (!["sales", "listings"].includes(kind) || !["pdf", "csv"].includes(format))
+    fail(404, "Report not found");
+  const data =
+    kind === "sales"
+      ? await rows(
+          "SELECT product_name,quantity,total,payment_method,status,created_at FROM orders WHERE seller_id=$1 ORDER BY created_at DESC",
+          [req.user.id],
+        )
+      : await rows(
+          "SELECT title,price,status,size_weight,condition,created_at FROM listings WHERE seller_id=$1 ORDER BY created_at DESC",
+          [req.user.id],
+        );
+  const header =
+    kind === "sales"
+      ? [
+          "Product",
+          "Quantity",
+          "Total LKR",
+          "Payment method",
+          "Status",
+          "Created",
+        ]
+      : [
+          "Product",
+          "Price LKR",
+          "Status",
+          "Size & Weight",
+          "Condition",
+          "Created",
+        ];
+  const values = data.map((d) =>
+    kind === "sales"
+      ? [
+          d.product_name,
+          d.quantity,
+          d.total,
+          d.payment_method,
+          d.status,
+          d.created_at,
+        ]
+      : [d.title, d.price, d.status, d.size_weight, d.condition, d.created_at],
+  );
+  await audit(req.user.id, "report." + kind, null, { format });
+  res.set("Cache-Control", "no-store");
+  if (format === "csv") csv(res, "NearBuy " + kind, [header, ...values]);
+  else
+    pdf(res, "NearBuy " + kind, [
+      "Seller: " + req.user.name,
+      kind === "sales"
+        ? "Order totals; payment collection is not tracked."
+        : "Current listing inventory",
+      header.join(" | "),
+      ...values.map((r) => r.join(" | ")),
+    ]);
 });

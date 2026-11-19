@@ -3,6 +3,10 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 export const production = process.env.NODE_ENV === "production";
+export const demoEnabled =
+  !production &&
+  (process.env.DEMO_MODE === "true" ||
+    (process.env.NODE_ENV !== "test" && process.env.DEMO_MODE !== "false"));
 export const root = path.resolve(process.env.DATA_DIR || "data");
 mkdirSync(root, { recursive: true });
 function secret(name) {

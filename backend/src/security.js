@@ -11,7 +11,7 @@ import winston from "winston";
 import { rateLimit } from "express-rate-limit";
 import { mkdirSync } from "node:fs";
 import { z } from "zod";
-import { config } from "./config.js";
+import { config, demoEnabled } from "./config.js";
 import { query, one } from "./db.js";
 mkdirSync("logs", { recursive: true });
 export const logger = winston.createLogger({
@@ -67,6 +67,7 @@ export const publicUser = (u) => ({
   verification_status: u.verification_status,
   phone_verified: u.phone_verified,
   verification_note: u.verification_note,
+  location: u.location,
 });
 export const accessToken = (u, family) =>
   jwt.sign({ sub: u.id, sid: family }, config.jwt, {
@@ -93,7 +94,7 @@ export async function authenticateToken(token) {
     "SELECT u.* FROM users u JOIN session_families f ON f.user_id=u.id WHERE u.id=$1 AND f.id=$2 AND f.revoked=false",
     [claims.sub, claims.sid],
   );
-  if (!u || u.status !== "active")
+  if (!u || u.status !== "active" || (u.is_demo && !demoEnabled))
     throw Object.assign(new Error("Account or session is unavailable"), {
       status: 401,
     });

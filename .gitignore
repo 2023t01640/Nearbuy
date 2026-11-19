@@ -7,3 +7,5 @@ backend/data/
 backend/uploads/
 backend/logs/
 backend/test-data/
+release/
+desktop/stage/

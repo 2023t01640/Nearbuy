@@ -1,10 +1,11 @@
+import { identityUpload, identityPhoto } from "./identity.js";
 import { Router } from "express";
 import { z } from "zod";
 import { randomInt } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { root, production } from "./config.js";
-import { one, query, rows } from "./db.js";
+import { one, query, rows, transaction } from "./db.js";
 import {
   auth,
   roles,
@@ -20,16 +21,27 @@ import {
 } from "./security.js";
 export const verificationRouter = Router();
 verificationRouter.use(auth, roles("seller"));
-verificationRouter.get("/", (req, res) => res.json(publicUser(req.user)));
+verificationRouter.get("/", (req, res) => {
+  res.set("Cache-Control", "no-store").json({
+    ...publicUser(req.user),
+    identity_number: decrypt(req.user.identity_encrypted),
+    phone: decrypt(req.user.phone_encrypted),
+    has_nic_photo: !!req.user.nic_photo_encrypted,
+    br_number: decrypt(req.user.br_number_encrypted),
+  });
+});
 verificationRouter.post(
   "/",
   limit(6, 3600000),
+  identityUpload,
   validate(
     z
       .object({
-        identity_type: z.enum(["nic", "business"]),
+        identity_type: z.literal("nic"),
         identity_number: text(5, 40),
         phone: z.string().regex(/^\+94[1-9]\d{8}$/),
+        br_number: text(3, 70),
+        legal_agreement: z.literal("agree"),
       })
       .strict(),
   ),
@@ -42,20 +54,30 @@ verificationRouter.post(
       !/^(\d{9}[vVxX]|\d{12})$/.test(b.identity_number)
     )
       fail(400, "Enter a valid Sri Lankan NIC format");
-    await query(
-      "UPDATE users SET identity_type=$1,identity_encrypted=$2,phone_encrypted=$3,phone_verified=false,verification_status='unverified',verification_note=NULL WHERE id=$4",
-      [
-        b.identity_type,
-        encrypt(b.identity_number),
-        encrypt(b.phone),
-        req.user.id,
-      ],
-    );
+    const nicPhoto = req.files?.nic_photo?.[0]
+      ? await identityPhoto(req.files.nic_photo[0])
+      : req.user.nic_photo_encrypted;
+    if (!nicPhoto) fail(400, "A NIC photo is required");
+    const brPhoto = await identityPhoto(req.files?.br_photo?.[0]);
     const code = String(randomInt(100000, 1000000));
-    await query(
-      "INSERT INTO phone_codes(user_id,code_hash,expires_at,attempts) VALUES($1,$2,$3,0) ON CONFLICT(user_id) DO UPDATE SET code_hash=$2,expires_at=$3,attempts=0",
-      [req.user.id, digest(code), new Date(Date.now() + 10 * 60000)],
-    );
+    await transaction(async (tx) => {
+      const updated = await tx.query(
+        "UPDATE users SET nic_photo_encrypted=$1,br_number_encrypted=$2,br_photo_encrypted=$3,legal_agreement_at=now(),identity_type='nic',identity_encrypted=$4,phone_encrypted=$5,phone_verified=false,verification_status='unverified',verification_note=NULL WHERE id=$6 AND verification_status!='verified' RETURNING id",
+        [
+          nicPhoto,
+          encrypt(b.br_number),
+          brPhoto,
+          encrypt(b.identity_number),
+          encrypt(b.phone),
+          req.user.id,
+        ],
+      );
+      if (!updated.rows.length) fail(409, "Already verified");
+      await tx.query(
+        "INSERT INTO phone_codes(user_id,code_hash,expires_at,attempts) VALUES($1,$2,$3,0) ON CONFLICT(user_id) DO UPDATE SET code_hash=$2,expires_at=$3,attempts=0",
+        [req.user.id, digest(code), new Date(Date.now() + 10 * 60000)],
+      );
+    });
     if (process.env.SMS_WEBHOOK_URL) {
       const response = await fetch(process.env.SMS_WEBHOOK_URL, {
         method: "POST",
@@ -71,7 +93,8 @@ verificationRouter.post(
       });
       if (!response.ok)
         fail(502, "Could not deliver phone code. Please resubmit.");
-    } else if (!production) {
+    }
+    if (!production) {
       await writeFile(
         path.join(root, "phone-outbox.json"),
         JSON.stringify({ userId: req.user.id, code, expiresInMinutes: 10 }),
@@ -79,10 +102,14 @@ verificationRouter.post(
       );
     }
     await audit(req.user.id, "seller.verification_submitted", req.user.id);
+    req.app.get("io")?.of("/marketplace").emit("seller-verification-changed", {
+      sellerId: req.user.id,
+      verification_status: "unverified",
+    });
+    res.set("Cache-Control", "no-store");
     res.json({
-      message: production
-        ? "Phone code sent"
-        : "Phone code created. Local development: see backend/data/phone-outbox.json.",
+      message: "Phone code sent. Enter it below to confirm your number.",
+      ...(!production ? { devOtp: code, expiresInSeconds: 600 } : {}),
     });
   },
 );
@@ -107,6 +134,10 @@ verificationRouter.post(
       [req.user.id],
     );
     await audit(req.user.id, "seller.phone_verified", req.user.id);
+    req.app.get("io")?.of("/marketplace").emit("seller-verification-changed", {
+      sellerId: req.user.id,
+      verification_status: "pending",
+    });
     res.json({
       message: "Phone confirmed. Your verification is awaiting admin review.",
     });
@@ -115,7 +146,7 @@ verificationRouter.post(
 export async function verificationQueue() {
   return (
     await rows(
-      "SELECT id,name,email,identity_type,identity_encrypted,phone_encrypted,phone_verified,verification_status FROM users WHERE role='seller' AND verification_status='pending' ORDER BY created_at",
+      "SELECT id,name,email,identity_type,identity_encrypted,phone_encrypted,phone_verified,verification_status,br_number_encrypted,nic_photo_encrypted,br_photo_encrypted,address_encrypted,location,product_category,seller_terms_at,legal_agreement_at FROM users WHERE role='seller' AND verification_status='pending' ORDER BY created_at",
     )
   ).map((u) => ({
     id: u.id,
@@ -124,6 +155,14 @@ export async function verificationQueue() {
     identity_type: u.identity_type,
     identity_number: decrypt(u.identity_encrypted),
     phone: decrypt(u.phone_encrypted),
+    br_number: decrypt(u.br_number_encrypted),
+    has_nic_photo: !!u.nic_photo_encrypted,
+    has_br_photo: !!u.br_photo_encrypted,
+    address: decrypt(u.address_encrypted),
+    district: u.location,
+    product_category: u.product_category,
+    seller_terms_at: u.seller_terms_at,
+    legal_agreement_at: u.legal_agreement_at,
     phone_verified: u.phone_verified,
     verification_status: u.verification_status,
   }));

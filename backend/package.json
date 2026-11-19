@@ -10,7 +10,8 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
-    "admin": "node scripts/create-admin.js"
+    "admin": "node scripts/create-admin.js",
+    "seed": "node scripts/seed.js"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.3.14",

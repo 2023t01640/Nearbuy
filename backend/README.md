@@ -28,9 +28,9 @@ The local backend uses persistent embedded PostgreSQL (PGlite), so no PostgreSQL
 
 ## Try the complete workflow
 
-1. Register a seller and create a listing. The fresh database has categories but no mock listings. Listings start as private drafts.
-2. Submit seller identity and phone details. For local testing, read the code in `backend/data/phone-outbox.json` and confirm it. Production requires an SMS delivery adapter.
-3. Sign in with the local admin credentials and approve the request in Seller Verifications. The listing becomes public.
+1. Register a seller and create a listing. The fresh database has categories but no mock listings. New listings appear immediately with an Unverified Seller badge.
+2. Submit seller identity and phone details. For local testing, use the Dev Mode OTP Preview on the verification form. The code is also saved in `backend/data/phone-outbox.json`. Production requires an SMS delivery adapter.
+3. Sign in with the local admin credentials and approve the request in Seller Verifications. The seller badge updates to Verified Seller in connected marketplace pages.
 4. Register a buyer, start a private conversation and leave a review after messaging.
 5. Sign in as the seller to reply, edit or mark the item sold, and download monthly sales PDF/daily inquiries CSV reports.
 6. Use Admin Dashboard to moderate users/flagged listings, manage categories, inspect logs and download daily activity PDF/monthly audit CSV reports.
@@ -65,7 +65,7 @@ Phone codes expire after 10 minutes with at most five attempts. Development deli
 
 ## Resource rules
 
-- Unverified sellers create private drafts; admin approval publishes eligible drafts. Sold/removed listings cannot be edited. Listing deletion is soft deletion. Discovery supports category/location/query filters and up to 100 results per page with `offset`.
+- Seller listings publish immediately with their verification status. Admin approval updates the public badge through Socket.io. Sold/removed listings cannot be edited. Listing deletion is soft deletion. Discovery supports category/location/query filters and up to 100 results per page with `offset`.
 - Admin category CRUD rejects deletion of in-use categories.
 - Only buyers who sent a message can review a listing, once per buyer/listing. They can edit/delete their review; admins can delete reviews. Interaction is checked, not proof of purchase.
 - Images: JPEG/PNG/WebP, 5 MiB maximum each, matching MIME and magic bytes. Sharp decodes/re-encodes WebP, strips metadata and limits pixels/dimensions. Only owned upload URLs can be attached, up to six. Product photos are public.

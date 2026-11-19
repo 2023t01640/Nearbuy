@@ -1,3 +1,5 @@
+import { placeOrder, selectionSchema } from "./purchases.js";
+import { districts } from "./districts.js";
 import { Router } from "express";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
@@ -5,7 +7,7 @@ import multer from "multer";
 import { fileTypeFromBuffer } from "file-type";
 import sharp from "sharp";
 import path from "node:path";
-import { query, one, rows } from "./db.js";
+import { query, one, rows, transaction } from "./db.js";
 import { config } from "./config.js";
 import {
   auth,
@@ -17,15 +19,18 @@ import {
   validateId,
   fail,
   audit,
+  encrypt,
+  decrypt,
   limit,
 } from "./security.js";
 export const marketplace = Router();
-const listingSelect = `SELECT l.*,u.name AS seller,u.verification_status,c.name AS category FROM listings l JOIN users u ON u.id=l.seller_id JOIN categories c ON c.id=l.category_id`;
+const listingSelect = `SELECT l.*,u.name AS seller,u.verification_status,c.name AS category,(SELECT round(avg(r.rating),1) FROM reviews r JOIN listings reviewed ON reviewed.id=r.listing_id WHERE reviewed.seller_id=u.id) AS seller_rating,(SELECT count(*)::int FROM reviews r JOIN listings reviewed ON reviewed.id=r.listing_id WHERE reviewed.seller_id=u.id) AS seller_review_count FROM listings l JOIN users u ON u.id=l.seller_id LEFT JOIN categories c ON c.id=l.category_id`;
 export const listingView = (p) => {
   const { flag_reason, ...safe } = p;
   return {
     ...safe,
-    price: Number(p.price),
+    price: p.price == null ? null : Number(p.price),
+    category: p.category || "Unspecified",
     owner: p.seller_id,
     createdAt: p.created_at,
     soldAt: p.sold_at,
@@ -39,22 +44,45 @@ export async function getListing(id) {
 export function canSee(p, u) {
   return (
     p &&
-    (["active", "sold"].includes(p.status) ||
+    (["approved", "sold"].includes(p.status) ||
       u?.id === p.seller_id ||
       u?.role === "admin")
   );
 }
 const listingSchema = z
   .object({
-    title: text(3, 100),
-    description: text(15, 2000),
-    price: z.number().positive().max(9999999999),
-    category_id: z.number().int().positive(),
-    location: text(2, 60),
-    condition: z.enum(["New", "Like new", "Good", "Fair"]),
+    title: text(0, 100).default(""),
+    description: text(0, 2000).default(""),
+    price: z.number().positive().max(9999999999).nullable().default(null),
+    category_id: z.number().int().positive().nullable().default(null),
+    location: text(0, 60).default(""),
+    district: z.enum(districts).optional(),
+    stock_quantity: z.number().int().min(0).max(1000000).default(1),
+    variants: z
+      .record(
+        text(1, 40),
+        z
+          .array(text(1, 60))
+          .min(1)
+          .max(20)
+          .refine((a) => new Set(a).size === a.length),
+      )
+      .refine((o) => Object.keys(o).length <= 5)
+      .default({}),
+    condition: z.enum(["", "New", "Like new", "Good", "Fair"]).default(""),
+    size_weight: text(0, 160).default(""),
+    payment_methods: z
+      .array(z.enum(["Cash on Delivery", "Online Payment"]))
+      .max(2)
+      .refine((a) => new Set(a).size === a.length)
+      .default([]),
+    specs: z
+      .record(text(1, 40), text(1, 160))
+      .refine((s) => Object.keys(s).length <= 20, "Maximum 20 specifications")
+      .optional(),
     images: z
       .array(z.string().regex(/^\/uploads\/[a-f0-9-]+\.webp$/))
-      .max(6)
+      .max(8)
       .default([]),
   })
   .strict();
@@ -116,6 +144,7 @@ marketplace.get("/listings", optionalAuth, async (req, res) => {
       q: text(0, 100).optional(),
       category: z.coerce.number().int().positive().optional(),
       location: text(0, 60).optional(),
+      district: z.enum(districts).optional(),
       mine: z.enum(["true"]).optional(),
       offset: z.coerce.number().int().min(0).max(100000).default(0),
     })
@@ -125,7 +154,7 @@ marketplace.get("/listings", optionalAuth, async (req, res) => {
   if (b.mine && !req.user) fail(401, "Sign in required");
   const result = await rows(
     listingSelect +
-      ` WHERE ($1::boolean=false AND l.status='active' AND u.status='active' OR $1::boolean=true AND l.seller_id=$2) AND ($3::text IS NULL OR l.title ILIKE $3 OR l.description ILIKE $3) AND ($4::integer IS NULL OR l.category_id=$4) AND ($5::text IS NULL OR l.location ILIKE $5) ORDER BY l.created_at DESC LIMIT 100 OFFSET $6`,
+      ` WHERE ($1::boolean=false AND l.status='approved' AND u.status='active' OR $1::boolean=true AND l.seller_id=$2) AND ($3::text IS NULL OR l.title ILIKE $3 OR l.description ILIKE $3) AND ($4::integer IS NULL OR l.category_id=$4) AND ($5::text IS NULL OR (l.district ILIKE $5 OR l.location ILIKE $5)) AND ($7::text IS NULL OR l.district=$7) ORDER BY l.created_at DESC LIMIT 100 OFFSET $6`,
     [
       !!b.mine,
       req.user?.id || null,
@@ -133,6 +162,7 @@ marketplace.get("/listings", optionalAuth, async (req, res) => {
       b.category || null,
       b.location ? "%" + b.location + "%" : null,
       b.offset,
+      b.district || null,
     ],
   );
   res.json(result.map(listingView));
@@ -140,10 +170,19 @@ marketplace.get("/listings", optionalAuth, async (req, res) => {
 marketplace.get("/listings/:id", optionalAuth, validateId, async (req, res) => {
   const p = await getListing(req.params.id);
   if (!canSee(p, req.user)) fail(404, "Listing not found");
-  res.json(listingView(p));
+  const ordered =
+    req.user?.role === "buyer" &&
+    !!(await one("SELECT id FROM orders WHERE listing_id=$1 AND buyer_id=$2", [
+      p.id,
+      req.user.id,
+    ]));
+  res.json({ ...listingView(p), can_review: !!ordered });
 });
 async function checkListingInput(b, u) {
-  if (!(await one("SELECT id FROM categories WHERE id=$1", [b.category_id])))
+  if (
+    b.category_id &&
+    !(await one("SELECT id FROM categories WHERE id=$1", [b.category_id]))
+  )
     fail(400, "Unknown category");
   for (const image of b.images) {
     if (
@@ -164,9 +203,9 @@ marketplace.post(
     await checkListingInput(req.body, req.user);
     const b = req.body,
       uid = randomUUID(),
-      status = req.user.verification_status === "verified" ? "active" : "draft";
+      status = approvalStatus(b);
     await query(
-      "INSERT INTO listings(id,seller_id,category_id,title,description,price,location,condition,images,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+      "INSERT INTO listings(id,seller_id,category_id,title,description,price,location,condition,images,status,specs,size_weight,payment_methods,district,stock_quantity,variants) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
       [
         uid,
         req.user.id,
@@ -178,6 +217,16 @@ marketplace.post(
         b.condition,
         JSON.stringify(b.images),
         status,
+        JSON.stringify(b.specs || {}),
+        b.size_weight,
+        JSON.stringify(b.payment_methods),
+        b.district ||
+          districts.find((d) =>
+            b.location.toLowerCase().startsWith(d.toLowerCase()),
+          ) ||
+          (districts.includes(req.user.location) ? req.user.location : null),
+        b.stock_quantity,
+        JSON.stringify(b.variants),
       ],
     );
     await audit(req.user.id, "listing.created", uid);
@@ -199,7 +248,7 @@ marketplace.put(
     await checkListingInput(req.body, req.user);
     const b = req.body;
     await query(
-      "UPDATE listings SET category_id=$1,title=$2,description=$3,price=$4,location=$5,condition=$6,images=$7,updated_at=now() WHERE id=$8",
+      "UPDATE listings SET category_id=$1,title=$2,description=$3,price=$4,location=$5,condition=$6,images=$7,specs=COALESCE($9::jsonb,specs),size_weight=$10,payment_methods=$11,status=$12,district=$13,stock_quantity=$14,variants=$15,approval_note=NULL,updated_at=now() WHERE id=$8",
       [
         b.category_id,
         b.title,
@@ -209,6 +258,13 @@ marketplace.put(
         b.condition,
         JSON.stringify(b.images),
         p.id,
+        b.specs ? JSON.stringify(b.specs) : null,
+        b.size_weight,
+        JSON.stringify(b.payment_methods),
+        approvalStatus(b),
+        b.district || p.district,
+        b.stock_quantity,
+        JSON.stringify(b.variants),
       ],
     );
     await audit(req.user.id, "listing.updated", p.id);
@@ -222,7 +278,7 @@ marketplace.patch(
   validateId,
   async (req, res) => {
     const p = await one(
-      "UPDATE listings SET status='sold',sold_at=now(),updated_at=now() WHERE id=$1 AND seller_id=$2 AND status='active' RETURNING id",
+      "UPDATE listings SET status='sold',sold_at=now(),updated_at=now() WHERE id=$1 AND seller_id=$2 AND status='approved' RETURNING id",
       [req.params.id, req.user.id],
     );
     if (!p) fail(409, "Only your active listings can be marked sold");
@@ -318,7 +374,7 @@ marketplace.get(
       fail(404, "Listing not found");
     res.json(
       await rows(
-        "SELECT r.id,r.buyer_id,r.rating,r.body AS text,r.created_at,u.name FROM reviews r JOIN users u ON u.id=r.buyer_id WHERE listing_id=$1 ORDER BY created_at DESC",
+        "SELECT r.id,r.buyer_id,r.rating,r.body AS text,r.created_at,u.name,EXISTS(SELECT 1 FROM orders o WHERE o.listing_id=r.listing_id AND o.buyer_id=r.buyer_id) AS verified_purchase FROM reviews r JOIN users u ON u.id=r.buyer_id WHERE listing_id=$1 ORDER BY created_at DESC",
         [req.params.id],
       ),
     );
@@ -340,11 +396,11 @@ marketplace.post(
     if (!canSee(p, req.user)) fail(404, "Listing not found");
     if (
       !(await one(
-        "SELECT id FROM messages WHERE listing_id=$1 AND buyer_id=$2 AND sender_id=$2 LIMIT 1",
+        "SELECT id FROM orders WHERE listing_id=$1 AND buyer_id=$2 LIMIT 1",
         [p.id, req.user.id],
       ))
     )
-      fail(403, "Message this seller before leaving a review");
+      fail(403, "Place an order with Buy Now before leaving a review");
     const r = await one(
       "INSERT INTO reviews(id,listing_id,buyer_id,rating,body) VALUES($1,$2,$3,$4,$5) RETURNING *",
       [randomUUID(), p.id, req.user.id, req.body.rating, req.body.text],
@@ -365,7 +421,7 @@ marketplace.patch(
   ),
   async (req, res) => {
     const r = await one(
-      "UPDATE reviews SET rating=$1,body=$2 WHERE id=$3 AND buyer_id=$4 RETURNING *",
+      "UPDATE reviews SET rating=$1,body=$2 WHERE id=$3 AND buyer_id=$4 AND EXISTS(SELECT 1 FROM orders o WHERE o.listing_id=reviews.listing_id AND o.buyer_id=$4) RETURNING *",
       [req.body.rating, req.body.text, req.params.id, req.user.id],
     );
     if (!r) fail(404, "Review not found");
@@ -388,3 +444,85 @@ marketplace.delete(
     res.status(204).end();
   },
 );
+
+export function missingListingDetails(b) {
+  return [
+    !b.title || b.title.trim().length < 3
+      ? "Product name (at least 3 characters)"
+      : null,
+    !b.size_weight?.trim() ? "Size & Weight" : null,
+    !b.images?.length ? "At least one product photo" : null,
+    !b.description || b.description.trim().length < 15
+      ? "Description (at least 15 characters)"
+      : null,
+    !b.category_id ? "Product category" : null,
+    !b.condition ? "Product condition" : null,
+    !(Number(b.price) > 0) ? "Price" : null,
+    !b.payment_methods?.length ? "Payment method" : null,
+  ].filter(Boolean);
+}
+function approvalStatus(b) {
+  return missingListingDetails(b).length ? "pending_admin" : "approved";
+}
+marketplace.post(
+  "/listings/:id/orders",
+  auth,
+  roles("buyer"),
+  limit(15),
+  validateId,
+  validate(
+    z
+      .object({
+        address: text(10, 500),
+        quantity: z.number().int().min(1).max(99).default(1),
+        selected_variants: selectionSchema,
+        card_simulation: z.boolean().optional(),
+        payment_method: z.enum(["Cash on Delivery", "Online Payment"]),
+      })
+      .strict(),
+  ),
+  async (req, res) => {
+    const order = await transaction(async (tx) => {
+      const p = (
+        await tx.query(
+          "SELECT l.* FROM listings l JOIN users u ON u.id=l.seller_id WHERE l.id=$1 AND l.status='approved' AND u.status='active' AND u.role='seller' FOR UPDATE OF l",
+          [req.params.id],
+        )
+      ).rows[0];
+      if (!p) fail(409, "This listing is unavailable");
+      if (p.seller_id === req.user.id)
+        fail(403, "You cannot order your own listing");
+      if (
+        !(Number(p.price) > 0) ||
+        !p.payment_methods.includes(req.body.payment_method)
+      )
+        fail(400, "Choose a payment method enabled by this seller");
+      return placeOrder(tx, {
+        listing: p,
+        buyerId: req.user.id,
+        quantity: req.body.quantity,
+        selection: req.body.selected_variants,
+        address: req.body.address,
+        method: req.body.payment_method,
+        cardSimulation: req.body.card_simulation,
+      });
+    });
+    await audit(req.user.id, "order.placed", order.id, {
+      listingId: req.params.id,
+    });
+    res.status(201).json(order);
+  },
+);
+
+marketplace.get("/orders", auth, roles("buyer", "seller"), async (req, res) => {
+  const orders = await rows(
+    "SELECT o.*,u.name AS buyer_name,s.name AS seller_name FROM orders o JOIN users u ON u.id=o.buyer_id JOIN users s ON s.id=o.seller_id WHERE o.buyer_id=$1 OR o.seller_id=$1 ORDER BY o.created_at DESC LIMIT 100",
+    [req.user.id],
+  );
+  res.set("Cache-Control", "no-store").json(
+    orders.map(({ address_encrypted, ...o }) => ({
+      ...o,
+      address: decrypt(address_encrypted),
+    })),
+  );
+});

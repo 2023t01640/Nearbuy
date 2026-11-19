@@ -61,7 +61,7 @@ export const openapi = {
     title: "NearBuy API",
     version: "2.0.0",
     description:
-      "Persistent PostgreSQL marketplace. Bearer tokens expire after 10 minutes. Refresh cookies are HttpOnly, SameSite=Strict and rotate on every refresh. Cookie endpoints require an allowlisted Origin and X-NearBuy-CSRF: 1. No public admin registration. Only verified sellers publish listings. All reporting periods use Asia/Colombo.",
+      "Persistent PostgreSQL marketplace. Bearer tokens expire after 10 minutes. Refresh cookies are HttpOnly, SameSite=Strict and rotate on every refresh. Cookie endpoints require an allowlisted Origin and X-NearBuy-CSRF: 1. No public admin registration. Active sellers publish immediately with a public verification status. All reporting periods use Asia/Colombo.",
   },
   servers: [{ url: "/api/v1" }],
   components: {
@@ -222,12 +222,9 @@ route("get", "/listings", "Browse active listings or own inventory", {
     ["offset", "integer", "Page offset; each response has up to 100 items"],
   ],
 });
-route(
-  "post",
-  "/listings",
-  "Seller: create listing; unverified accounts create drafts",
-  { body: "Listing" },
-);
+route("post", "/listings", "Seller: create an immediately visible listing", {
+  body: "Listing",
+});
 route(
   "get",
   "/listings/{id}",
@@ -368,7 +365,10 @@ Object.assign(schemas, {
       category: string,
       location: string,
       condition: { type: "string", enum: ["New", "Like new", "Good", "Fair"] },
-      status: { type: "string", enum: ["draft", "active", "sold", "removed"] },
+      status: {
+        type: "string",
+        enum: ["draft", "approved", "pending_admin", "sold", "removed"],
+      },
       images: { type: "array", items: string },
       seller: string,
       verification_status: {
@@ -502,3 +502,331 @@ openapi.paths["/uploads"].post.responses[201].content[
 ].schema = object({ url: string });
 openapi.paths["/health"].get.responses[200].content["application/json"].schema =
   object({ status: string });
+
+route(
+  "get",
+  "/auth/demo-accounts",
+  "Local presentation credential-fill options (404 when demo mode is disabled)",
+  {
+    publicRoute: true,
+    description:
+      "Fictional demo accounts only. Uses normal POST /auth/login afterwards. Disabled in production. No-store response.",
+  },
+);
+openapi.paths["/auth/demo-accounts"].get.responses[200].content[
+  "application/json"
+].schema = {
+  type: "array",
+  items: object({
+    label: string,
+    name: string,
+    role: string,
+    email: string,
+    password: string,
+  }),
+};
+schemas.Listing.properties.specs = {
+  type: "object",
+  maxProperties: 20,
+  additionalProperties: { type: "string", minLength: 1, maxLength: 160 },
+};
+schemas.ListingResult.properties.specs = schemas.Listing.properties.specs;
+schemas.User.properties.location = { type: "string", nullable: true };
+
+delete openapi.paths["/verification"].post.responses[201];
+openapi.paths["/verification"].post.responses[200].content[
+  "application/json"
+].schema = {
+  type: "object",
+  properties: {
+    message: string,
+    devOtp: {
+      type: "string",
+      pattern: "^[0-9]{6}$",
+      description: "Development only. Omitted in production.",
+    },
+    expiresInSeconds: { type: "integer" },
+  },
+};
+
+// Registration and identity document contracts.
+const phoneSchema = { type: "string", pattern: "^\\+94[1-9]\\d{8}$" };
+const registrationBase = {
+  name: string,
+  email: { ...string, format: "email" },
+  password: { ...string, minLength: 12, maxLength: 128 },
+  phone: phoneSchema,
+};
+schemas.BuyerRegistration = object({
+  ...registrationBase,
+  role: { ...string, enum: ["buyer"] },
+  challengeId: { ...string, minLength: 64, maxLength: 64 },
+});
+schemas.SellerRegistration = object({
+  ...registrationBase,
+  role: { ...string, enum: ["seller"] },
+  nic_number: string,
+  nic_photo: { type: "string", format: "binary" },
+  product_category: string,
+  address: string,
+  district: string,
+  seller_terms: { ...string, enum: ["agree"] },
+});
+schemas.Register = {
+  oneOf: [
+    { $ref: "#/components/schemas/BuyerRegistration" },
+    { $ref: "#/components/schemas/SellerRegistration" },
+  ],
+};
+openapi.paths["/auth/register"].post.requestBody.content = {
+  "multipart/form-data": { schema: { $ref: "#/components/schemas/Register" } },
+  "application/json": {
+    schema: { $ref: "#/components/schemas/BuyerRegistration" },
+  },
+};
+openapi.paths["/auth/register"].post.description =
+  "Buyer: first request and confirm an OTP bound to this email/mobile number. Seller: supply all fields and NIC photo; district must be one of the 25 Sri Lankan districts, category must exist or be Other. Images: JPEG/PNG/WebP, maximum 5 MB.";
+route("post", "/auth/registration-otp", "Send buyer registration phone OTP", {
+  publicRoute: true,
+  body: object({ email: { ...string, format: "email" }, phone: phoneSchema }),
+  description:
+    "Returns opaque challengeId and devOtp only outside production. Code expires in 10 minutes; delivery uses the configured SMS webhook. Development outbox: registration-phone-outbox.json.",
+});
+route("post", "/auth/confirm-registration-otp", "Verify buyer mobile number", {
+  publicRoute: true,
+  body: object({
+    challengeId: string,
+    code: { ...string, pattern: "^\\d{6}$" },
+  }),
+  description:
+    "At most five attempts; registration consumes the verified challenge once.",
+});
+route("post", "/auth/mock-oauth", "Local demo OAuth buyer login", {
+  publicRoute: true,
+  body: object({
+    provider: { ...string, enum: ["google", "facebook", "apple"] },
+  }),
+  response: "Session",
+  description:
+    "Available only with demo mode enabled outside production. No external OAuth authentication or user-supplied identity is accepted.",
+});
+schemas.Verification = object({
+  identity_type: { ...string, enum: ["nic"] },
+  identity_number: string,
+  phone: phoneSchema,
+  br_number: string,
+  br_photo: { type: "string", format: "binary" },
+  legal_agreement: { ...string, enum: ["agree"] },
+});
+schemas.Verification.properties.nic_photo = {
+  type: "string",
+  format: "binary",
+  description: "Required if no NIC photo is already saved.",
+};
+openapi.paths["/verification"].post.requestBody.content = {
+  "multipart/form-data": {
+    schema: { $ref: "#/components/schemas/Verification" },
+  },
+};
+Object.assign(schemas.VerificationRequest.properties, {
+  br_number: string,
+  has_nic_photo: { type: "boolean" },
+  has_br_photo: { type: "boolean" },
+  address: string,
+  district: string,
+  product_category: string,
+  seller_terms_at: { ...dateTime, nullable: true },
+  legal_agreement_at: { ...dateTime, nullable: true },
+});
+const docRoute = route(
+  "get",
+  "/admin/verifications/{id}/documents/{kind}",
+  "Admin: inspect private NIC or BR photo",
+  {
+    description:
+      "Returns {image: data:image/webp;base64,...}. Requires admin; access audited, Cache-Control no-store. Photos are encrypted in PostgreSQL, never public uploads.",
+  },
+);
+docRoute.parameters.find((p) => p.name === "kind").schema = {
+  type: "string",
+  enum: ["nic", "br"],
+};
+
+const paymentMethods = {
+  type: "array",
+  maxItems: 2,
+  uniqueItems: true,
+  items: { type: "string", enum: ["Cash on Delivery", "Online Payment"] },
+};
+Object.assign(schemas.Listing.properties, {
+  size_weight: { type: "string", maxLength: 160 },
+  payment_methods: paymentMethods,
+});
+schemas.Listing.properties.images.maxItems = 8;
+schemas.Listing.required = [];
+schemas.Listing.properties.price.nullable = true;
+schemas.Listing.properties.category_id.nullable = true;
+schemas.Listing.properties.condition.enum.unshift("");
+Object.assign(schemas.ListingResult.properties, {
+  size_weight: string,
+  payment_methods: paymentMethods,
+  can_review: { type: "boolean" },
+  seller_rating: { type: "string", nullable: true },
+  seller_review_count: { type: "integer" },
+  approval_note: { ...string, nullable: true },
+});
+for (const [method, path] of [
+  ["post", "/listings"],
+  ["put", "/listings/{id}"],
+])
+  openapi.paths[path][method].description =
+    "Sellers: eight complete details (name >=3 characters, size/weight, 1–8 owned uploaded photos, description >=15 characters, category, condition, positive price, at least one supported payment method) yield approved. Missing/short details yield pending_admin; invalid or unsafe values are rejected. Edits recalculate approval. Other is a regular category.";
+route("post", "/listings/{id}/orders", "Buyer: place an order", {
+  body: object({
+    address: { type: "string", minLength: 10, maxLength: 500 },
+    payment_method: {
+      type: "string",
+      enum: ["Cash on Delivery", "Online Payment"],
+    },
+  }),
+  description:
+    "Only approved listings from active sellers, using their enabled payment methods. Price and seller are taken from the database. Address is encrypted. One order per buyer/product; duplicate returns 409. This records an unpaid order, never processes a payment. Successful order enables reviews.",
+});
+openapi.paths["/listings/{id}/orders"].post.responses[201] =
+  openapi.paths["/listings/{id}/orders"].post.responses[200];
+delete openapi.paths["/listings/{id}/orders"].post.responses[200];
+route(
+  "get",
+  "/admin/listing-approvals",
+  "Admin: pending listings with missing_details",
+);
+route(
+  "patch",
+  "/admin/listing-approvals/{id}",
+  "Admin: approve or reject incomplete listing",
+  {
+    body: object({
+      decision: { type: "string", enum: ["approved", "removed"] },
+      note: { type: "string", minLength: 3, maxLength: 300 },
+    }),
+    description:
+      "Only pending_admin listings with an active seller. Decisions are audited.",
+  },
+);
+openapi.paths["/listings/{id}/reviews"].post.description =
+  "Buyer must have placed an order for this listing. Messaging alone is not sufficient. One review per buyer/listing.";
+openapi.paths["/reviews/{id}"].patch.description =
+  "Only the review owner with an order for the same listing may update it.";
+
+route("get", "/orders", "Buyer/seller: own orders only", {
+  description:
+    "Returns up to 100 recent orders involving the signed-in user, including their delivery addresses. Never public; Cache-Control no-store.",
+});
+
+route("get", "/profile", "Read own private profile");
+route("patch", "/profile", "Buyer: update name, phone and delivery address", {
+  body: object({ name: string, phone: phoneSchema, address: string }),
+  description:
+    "Changing phone resets phone_verified. Address and phone are encrypted.",
+});
+route(
+  "post",
+  "/profile/password",
+  "Buyer: change password and revoke all sessions",
+  {
+    body: object({
+      current_password: string,
+      password: { ...string, minLength: 12, maxLength: 128 },
+    }),
+  },
+);
+route("get", "/cart", "Buyer: own persistent cart");
+route("put", "/cart/{id}", "Buyer: add item or set quantity", {
+  body: object({ quantity: { type: "integer", minimum: 1, maximum: 99 } }),
+});
+route("delete", "/cart/{id}", "Buyer: remove own cart item");
+route("post", "/cart/checkout", "Buyer: atomically place cart orders", {
+  body: object({
+    address: string,
+    payments: {
+      type: "object",
+      additionalProperties: {
+        type: "string",
+        enum: ["Cash on Delivery", "Online Payment"],
+      },
+    },
+  }),
+  description:
+    "Payments maps listing UUIDs to seller-supported methods. Uses server prices and quantities; any unavailable/previously ordered item rolls back the entire checkout. Orders remain unpaid.",
+});
+route("patch", "/orders/{id}/status", "Seller: advance own order status", {
+  body: object({
+    status: { type: "string", enum: ["Pending", "Confirmed", "Delivered"] },
+  }),
+  description: "Pending to Confirmed to Delivered only. Changes audited.",
+});
+for (const kind of ["sales", "listings"])
+  for (const format of ["pdf", "csv"])
+    route(
+      "get",
+      `/reports/seller/${kind}/${format}`,
+      `Seller: export ${kind} as ${format}`,
+      { file: format === "pdf" ? "application/pdf" : "text/csv" },
+    );
+
+Object.assign(schemas.Listing.properties, {
+  district: { type: "string" },
+  stock_quantity: { type: "integer", minimum: 0, maximum: 1000000 },
+  variants: {
+    type: "object",
+    maxProperties: 5,
+    additionalProperties: {
+      type: "array",
+      minItems: 1,
+      maxItems: 20,
+      items: { type: "string", maxLength: 60 },
+    },
+  },
+});
+Object.assign(schemas.ListingResult.properties, {
+  district: string,
+  stock_quantity: { type: "integer" },
+  variants: schemas.Listing.properties.variants,
+});
+const selection = {
+  type: "object",
+  maxProperties: 5,
+  additionalProperties: { type: "string" },
+};
+Object.assign(
+  openapi.paths["/listings/{id}/orders"].post.requestBody.content[
+    "application/json"
+  ].schema.properties,
+  {
+    quantity: { type: "integer", minimum: 1, maximum: 99, default: 1 },
+    selected_variants: selection,
+    card_simulation: {
+      type: "boolean",
+      description:
+        "Local simulation only; no card fields are accepted by the API.",
+    },
+  },
+);
+openapi.paths["/cart/{id}"].put.requestBody.content[
+  "application/json"
+].schema.properties.selected_variants = selection;
+openapi.paths["/cart/checkout"].post.requestBody.content[
+  "application/json"
+].schema.properties.card_simulation = { type: "boolean" };
+openapi.paths["/orders/{id}/status"].patch.requestBody.content[
+  "application/json"
+].schema.properties.status.enum = [
+  "Pending",
+  "Confirmed",
+  "Packing",
+  "Delivered",
+];
+openapi.paths["/orders/{id}/status"].patch.description =
+  "Seller only: Pending -> Confirmed -> Packing -> Delivered. No skipping or backwards transitions.";
+openapi.paths["/listings/{id}/orders"].post.description +=
+  " Quantity must fit shared item stock and every variant selection must match seller options. Checkout atomically decrements stock and records 7% platform_fee and net_payout. Online Payment requires card_simulation=true outside production and records payment_status=simulated; production rejects simulated payments. PAN/CVV are never accepted or persisted.";

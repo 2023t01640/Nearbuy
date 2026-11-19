@@ -1,8 +1,10 @@
+import { installRegistration } from "./registration.js";
 import { Router } from "express";
 import { z } from "zod";
 import { randomBytes, randomUUID } from "node:crypto";
 import { one, query } from "./db.js";
-import { config } from "./config.js";
+import { config, demoEnabled } from "./config.js";
+import { availableDemoLogins } from "./seed.js";
 import {
   auth,
   audit,
@@ -17,6 +19,12 @@ import {
   fail,
 } from "./security.js";
 export const authRouter = Router();
+authRouter.get("/demo-accounts", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!demoEnabled)
+    return res.status(404).json({ error: "Demo login is disabled" });
+  res.json(await availableDemoLogins());
+});
 const cookieOptions = {
   httpOnly: true,
   secure: config.secure,
@@ -52,41 +60,11 @@ async function issue(res, u, family) {
   res.cookie("nb_refresh", refresh, cookieOptions);
   return { accessToken: accessToken(u, family), user: publicUser(u) };
 }
-authRouter.post(
-  "/register",
-  limit(8),
-  validate(
-    z
-      .object({
-        name: text(2, 70),
-        email,
-        password,
-        role: z.enum(["buyer", "seller"]),
-      })
-      .strict(),
-  ),
-  async (req, res) => {
-    const b = req.body;
-    if (await one("SELECT id FROM users WHERE email=$1", [b.email]))
-      fail(409, "Email is already registered");
-    const uid = randomUUID();
-    try {
-      await query(
-        "INSERT INTO users(id,name,email,password_hash,role) VALUES($1,$2,$3,$4,$5)",
-        [uid, b.name, b.email, await hashPassword(b.password), b.role],
-      );
-    } catch (e) {
-      if (e.code === "23505") fail(409, "Email is already registered");
-      throw e;
-    }
-    await audit(uid, "auth.register", uid);
-    res.status(201).json({ message: "Account created. Please sign in." });
-  },
-);
+installRegistration(authRouter, issue);
 let dummyHash;
 authRouter.post(
   "/login",
-  limit(10),
+  limit(demoEnabled ? 60 : 10),
   validate(z.object({ email, password: z.string().min(1).max(128) }).strict()),
   async (req, res) => {
     const u = await one("SELECT * FROM users WHERE email=$1", [req.body.email]);
@@ -95,7 +73,7 @@ authRouter.post(
       u?.password_hash || dummyHash,
       req.body.password,
     );
-    if (!u || !valid || u.status !== "active") {
+    if (!u || !valid || u.status !== "active" || (u.is_demo && !demoEnabled)) {
       await audit(null, "auth.login_failed", null, {
         emailHash: digest(req.body.email),
       });
@@ -150,7 +128,8 @@ authRouter.post("/refresh", limit(60), csrf, async (req, res) => {
   );
   if (!token) fail(401, "Session expired");
   const u = await one("SELECT * FROM users WHERE id=$1", [old.user_id]);
-  if (!u || u.status !== "active") fail(401, "Account unavailable");
+  if (!u || u.status !== "active" || (u.is_demo && !demoEnabled))
+    fail(401, "Account unavailable");
   res.json(await issue(res, u, old.family));
 });
 authRouter.post("/logout", csrf, async (req, res) => {

@@ -60,7 +60,7 @@ chatRouter.post(
   validate(z.object({ text: text(1, 1000), buyer_id: id.optional() }).strict()),
   async (req, res) => {
     const { p, buyer } = await participant(req);
-    if (p.status !== "active") fail(409, "This listing is no longer available");
+    if (p.status !== "approved") fail(409, "This listing is no longer available");
     const seller = await one("SELECT status FROM users WHERE id=$1", [
       p.seller_id,
     ]);

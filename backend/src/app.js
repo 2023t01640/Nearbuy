@@ -1,4 +1,6 @@
+import { accountRouter } from "./account.js";
 import express from "express";
+import path from "node:path";
 import helmet from "helmet";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -61,7 +63,7 @@ app.use("/api/v1/auth", authRouter);
 app.use("/api/v1/verification", verificationRouter);
 app.use("/api/v1/admin", adminRouter);
 app.use("/api/v1/reports", reports);
-app.use("/api/v1", marketplace, chatRouter);
+app.use("/api/v1", accountRouter, marketplace, chatRouter);
 app.use(
   "/uploads",
   express.static(config.uploadDir, {
@@ -75,6 +77,15 @@ app.use(
 );
 app.get("/api-docs.json", (req, res) => res.json(openapi));
 app.use("/api-docs", swaggerUI.serve, swaggerUI.setup(openapi));
+if (process.env.FRONTEND_DIST) {
+  const frontend = path.resolve(process.env.FRONTEND_DIST);
+  app.use(express.static(frontend));
+  app.get("/{*path}", (req, res, next) => {
+    if (req.path.startsWith("/api/") || req.path.startsWith("/uploads/"))
+      return next();
+    res.sendFile(path.join(frontend, "index.html"));
+  });
+}
 app.use((req, res) => res.status(404).json({ error: "Endpoint not found" }));
 app.use(async (err, req, res, next) => {
   const status =

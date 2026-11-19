@@ -1,3 +1,4 @@
+import { districts } from "./districts.js";
 import { PGlite } from "@electric-sql/pglite";
 import pg from "pg";
 import path from "node:path";
@@ -9,6 +10,21 @@ export const db = process.env.DATABASE_URL
 export const query = (sql, params = []) => db.query(sql, params);
 export const rows = async (sql, params = []) => (await query(sql, params)).rows;
 export const one = async (sql, params = []) => (await rows(sql, params))[0];
+export async function transaction(fn) {
+  if (db.transaction) return db.transaction(fn);
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 export async function initDb() {
   const schema = await readFile(
     new URL("./schema.sql", import.meta.url),
@@ -16,7 +32,20 @@ export async function initDb() {
   );
   if (db.exec) await db.exec(schema);
   else await db.query(schema);
+  for (const district of districts)
+    await query(
+      "UPDATE listings SET district=$1 WHERE district IS NULL AND (lower(location)=lower($1) OR location ILIKE $1 || ' %')",
+      [district],
+    );
+  await query(
+    "UPDATE listings SET district='Colombo' WHERE district IS NULL AND lower(location) IN ('homagama','nugegoda','maharagama','dehiwala','moratuwa','battaramulla','kollupitiya')",
+  );
+  await query(
+    "UPDATE listings l SET district=u.location FROM users u WHERE l.seller_id=u.id AND l.district IS NULL AND u.location=ANY($1::text[])",
+    [districts],
+  );
   for (const name of [
+    "Other",
     "Electronics",
     "Furniture",
     "Vehicles",

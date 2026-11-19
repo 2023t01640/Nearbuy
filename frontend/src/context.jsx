@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { api, onAuth, refresh } from "./api";
+import { io } from "socket.io-client";
 const Context = createContext();
 export const useApp = () => useContext(Context);
 export function Provider({ children }) {
@@ -20,6 +21,26 @@ export function Provider({ children }) {
     localStorage.setItem("nb-saved-api", JSON.stringify(saved));
   }, [saved]);
   useEffect(() => onAuth(setSession), []);
+  useEffect(() => {
+    const socket = io("/marketplace");
+    socket.on("seller-verification-changed", (update) => {
+      setListings((items) =>
+        items.map((item) =>
+          item.seller_id === update.sellerId
+            ? { ...item, verification_status: update.verification_status }
+            : item,
+        ),
+      );
+      window.dispatchEvent(
+        new CustomEvent("nearbuy:verification", { detail: update }),
+      );
+    });
+    socket.on("connect", () => {
+      reload();
+      window.dispatchEvent(new Event("nearbuy:verification"));
+    });
+    return () => socket.disconnect();
+  }, []);
   useEffect(() => {
     refresh()
       .catch(() => {})

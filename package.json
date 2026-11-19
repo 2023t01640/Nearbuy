@@ -1,0 +1,75 @@
+{
+  "name": "nearbuy-desktop-launcher",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NearBuy local marketplace launcher",
+  "author": "NearBuy",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "build:setup": "node desktop/build-setup.cjs",
+    "dev:frontend": "pnpm --dir frontend dev --port 5175",
+    "dev:backend": "pnpm --dir backend start",
+    "build": "pnpm --dir frontend build"
+  },
+  "devDependencies": {
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "lk.nearbuy.marketplace",
+    "productName": "NearBuy",
+    "asar": true,
+    "npmRebuild": false,
+    "directories": {
+      "output": "release",
+      "buildResources": "desktop/assets"
+    },
+    "files": [
+      "desktop/main.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "desktop/stage/backend",
+        "to": "backend"
+      },
+      {
+        "from": "frontend/dist",
+        "to": "frontend"
+      },
+      {
+        "from": "desktop/stage/backend/node_modules",
+        "to": "backend/node_modules",
+        "filter": [
+          "**/*",
+          "!.pnpm/**/*",
+          "!.bin/**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "desktop/assets/nearbuy.ico",
+      "signExecutable": false
+    },
+    "nsis": {
+      "artifactName": "NearBuy-Setup.exe",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "NearBuy",
+      "installerIcon": "desktop/assets/nearbuy.ico",
+      "uninstallerIcon": "desktop/assets/nearbuy.ico",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

@@ -1,4 +1,15 @@
-import React, { useState, useEffect } from "react";
+import { ProductOptions, FeePreview, validSelection } from "./ProductOptions";
+import {
+  BuyerMenu,
+  Cart,
+  BuyerOrders,
+  BuyerSettings,
+  AddToCart,
+} from "./Buyer";
+import ListingEditor from "./ListingEditor";
+import { BuyNow, ProductMenu } from "./Commerce";
+import Registration from "./Registration";
+import React, { useState, useEffect, useId } from "react";
 import {
   BrowserRouter,
   Routes,
@@ -23,6 +34,9 @@ import {
   X,
   Package,
   MessageCircle,
+  UserRound,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { io } from "socket.io-client";
 import { Provider, useApp } from "./context";
@@ -43,11 +57,16 @@ function Layout() {
   return (
     <>
       <header>
-        <Link className="brand" to="/">
-          <span className="brand-icon">
-            <MapPin size={23} />
+        <Link className="header-brand" to="/">
+          <span className="brand">
+            <span className="brand-icon">
+              <MapPin size={23} />
+            </span>
+            nearbuy.
           </span>
-          nearbuy.
+          <span className="brand-tagline">
+            Local Listings | Direct Chat | Verified Reviews
+          </span>
         </Link>
         <nav>
           <NavLink to="/" end>
@@ -63,13 +82,18 @@ function Layout() {
         <div className="header-actions">
           {session ? (
             <>
-              <span className="user-name">
-                {session.name}
-                <small>{session.role}</small>
-              </span>
+              {session.role === "buyer" ? (
+                <BuyerMenu />
+              ) : (
+                <span className="user-name">
+                  {session.name}
+                  <small>{session.role}</small>
+                </span>
+              )}
+
               <button
-                className="icon-btn"
-                aria-label="Sign out"
+                className="btn primary"
+                aria-label="Logout"
                 onClick={async () => {
                   try {
                     await api("/auth/logout", { method: "POST" });
@@ -79,32 +103,54 @@ function Layout() {
                   }
                 }}
               >
-                <LogOut size={18} />
+                <LogOut size={18} /> Logout
               </button>
             </>
           ) : (
             <Link to="/login">Log in</Link>
           )}
-          <Link
-            className="btn primary"
-            to={session?.role === "seller" ? "/seller?new=1" : "/register"}
-          >
-            <Plus size={17} /> Sell an item
-          </Link>
+          {!session && (
+            <Link className="btn primary" to="/register">
+              Register
+            </Link>
+          )}
         </div>
       </header>
-      <div className="demo-strip">
-        <span>NearBuy · Your local Sri Lankan marketplace</span>
-        <span>Buy thoughtfully. Connect locally.</span>
-      </div>
       {!ready ? (
         <main className="empty">Connecting to NearBuy…</main>
       ) : (
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/login" element={<Auth />} />
-          <Route path="/register" element={<Auth register />} />
+          <Route
+            path="/register"
+            element={<Registration PasswordInput={PasswordInput} />}
+          />
           <Route path="/listing/:id" element={<Details />} />
+          <Route
+            path="/cart"
+            element={
+              <Gate role="buyer">
+                <Cart />
+              </Gate>
+            }
+          />
+          <Route
+            path="/orders"
+            element={
+              <Gate role="buyer">
+                <BuyerOrders />
+              </Gate>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <Gate role="buyer">
+                <BuyerSettings PasswordInput={PasswordInput} />
+              </Gate>
+            }
+          />
           <Route
             path="/seller"
             element={
@@ -166,41 +212,51 @@ function Gate({ role, children }) {
     </main>
   );
 }
-function Auth({ register = false }) {
-  const [role, setRole] = useState("buyer"),
-    [error, setError] = useState(""),
+function PasswordInput({ visibilityLabel = "password", ...props }) {
+  const [visible, setVisible] = useState(false);
+  const inputId = useId();
+  const Icon = visible ? EyeOff : Eye;
+  return (
+    <span className="password-input">
+      <input {...props} id={inputId} type={visible ? "text" : "password"} />
+      <button
+        className="password-toggle"
+        type="button"
+        aria-label={`${visible ? "Hide" : "Show"} ${visibilityLabel}`}
+        aria-controls={inputId}
+        onClick={() => setVisible((value) => !value)}
+      >
+        <Icon size={18} aria-hidden="true" />
+      </button>
+    </span>
+  );
+}
+function Auth() {
+  const [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   const navigate = useNavigate();
-  const { notify } = useApp();
   async function submit(e) {
     e.preventDefault();
     setError("");
-    const d = Object.fromEntries(new FormData(e.target));
-    if (register && d.password !== d.confirm)
-      return setError("Passwords do not match");
     setBusy(true);
+    const data = new FormData(e.currentTarget);
     try {
-      if (register) {
-        await api("/auth/register", {
-          method: "POST",
-          body: { name: d.name, email: d.email, password: d.password, role },
-        });
-        notify("Account created. Sign in to continue.");
-        navigate("/login");
-      } else {
-        const data = await api("/auth/login", {
-          method: "POST",
-          body: { email: d.email, password: d.password },
-        });
-        acceptSession(data);
-        navigate(
-          data.user.role === "admin"
-            ? "/admin"
-            : data.user.role === "seller"
-              ? "/seller"
-              : "/",
-        );
+      if (getToken()) {
+        await api("/auth/logout", { method: "POST" });
+        acceptSession(null);
       }
+      const session = await api("/auth/login", {
+        method: "POST",
+        body: { email: data.get("email"), password: data.get("password") },
+      });
+      acceptSession(session);
+      navigate(
+        session.user.role === "admin"
+          ? "/admin"
+          : session.user.role === "seller"
+            ? "/seller"
+            : "/",
+      );
     } catch (e) {
       setError(e.message);
     } finally {
@@ -227,80 +283,30 @@ function Auth({ register = false }) {
         </div>
       </div>
       <section className="panel auth-form">
-        <h2>{register ? "Join the neighbourhood" : "Welcome back"}</h2>
-        <p>
-          {register
-            ? "Create your NearBuy account."
-            : "Sign in to your account."}
-        </p>
-        {register && (
-          <div className="role-switch">
-            {["buyer", "seller"].map((r) => (
-              <button
-                key={r}
-                className={role === r ? "active" : ""}
-                onClick={() => setRole(r)}
-              >
-                {r}
-              </button>
-            ))}
-          </div>
-        )}
-        <form key={String(register)} onSubmit={submit}>
-          {register && (
-            <label>
-              Full name
-              <input name="name" minLength={2} maxLength={70} required />
-            </label>
-          )}
+        <h2>Welcome back</h2>
+        <p>Sign in to your account.</p>
+        <form onSubmit={submit}>
           <label>
             Email
             <input name="email" type="email" autoComplete="email" required />
           </label>
           <label>
             Password
-            <input
+            <PasswordInput
               name="password"
-              type="password"
-              minLength={register ? 12 : 1}
+              autoComplete="current-password"
               maxLength={128}
-              autoComplete={register ? "new-password" : "current-password"}
               required
             />
-            {register && <small>At least 12 characters.</small>}
           </label>
-          {register && (
-            <label>
-              Confirm password
-              <input
-                name="confirm"
-                type="password"
-                autoComplete="new-password"
-                required
-              />
-            </label>
-          )}
           <ErrorBox error={error} />
           <button className="btn primary full" disabled={busy}>
-            {busy ? "Please wait…" : register ? "Create account" : "Log in"}{" "}
-            <ArrowRight size={16} />
+            {busy ? "Please wait..." : "Log in"} <ArrowRight size={16} />
           </button>
         </form>
         <p className="auth-foot">
-          <Link
-            to={register ? "/login" : "/register"}
-            onClick={() => setError("")}
-          >
-            {register
-              ? "Already registered? Log in"
-              : "New around here? Create an account"}
-          </Link>
+          <Link to="/register">New around here? Create an account</Link>
         </p>
-        {register && role === "seller" && (
-          <div className="notice">
-            Verify your identity and phone before your listings become public.
-          </div>
-        )}
       </section>
     </main>
   );
@@ -317,6 +323,17 @@ function Details() {
     [conversations, setConversations] = useState([]),
     [buyer, setBuyer] = useState(""),
     [sending, setSending] = useState(false);
+  useEffect(() => {
+    if (p && window.location.hash === "#reviews")
+      document
+        .getElementById("reviews")
+        ?.scrollIntoView({ behavior: "smooth" });
+  }, [p?.id]);
+  const [selection, setSelection] = useState({
+    quantity: 1,
+    selected_variants: {},
+  });
+  useEffect(() => setSelection({ quantity: 1, selected_variants: {} }), [id]);
   const isOwner = session?.id === p?.seller_id;
   const canChat =
     session?.role === "buyer" || (session?.role === "seller" && isOwner);
@@ -344,6 +361,9 @@ function Details() {
     setMessages([]);
     setBuyer("");
     load();
+    const update = () => load();
+    window.addEventListener("nearbuy:verification", update);
+    return () => window.removeEventListener("nearbuy:verification", update);
   }, [id, session?.id]);
   useEffect(() => {
     if (!canChat || (isOwner && !buyer)) return;
@@ -406,8 +426,11 @@ function Details() {
     );
   return (
     <main className="page">
-      <div className="breadcrumb">
-        <Link to="/">Marketplace</Link> / {p.category} / {p.title}
+      <div className="section-title">
+        <div className="breadcrumb">
+          <Link to="/">Marketplace</Link> / {p.category} / {p.title}
+        </div>
+        <ProductMenu product={p} />
       </div>
       <ErrorBox error={error} />
       <div className="detail-grid">
@@ -431,6 +454,13 @@ function Details() {
           <section className="panel">
             <h2>A little about this find</h2>
             <p>{p.description}</p>
+            <p>
+              <b>Size &amp; Weight:</b> {p.size_weight || "Not provided"}
+            </p>
+            <p>
+              <b>Payment methods:</b>{" "}
+              {(p.payment_methods || []).join(" · ") || "Not provided"}
+            </p>
             <div className="detail-specs">
               <span>
                 Condition<b>{p.condition}</b>
@@ -442,8 +472,24 @@ function Details() {
                 Collection<b>{p.location}</b>
               </span>
             </div>
+            {Object.keys(p.specs || {}).length > 0 && (
+              <dl className="product-specs">
+                {Object.entries(p.specs).map(([key, value]) => (
+                  <div key={key}>
+                    <dt>{key}</dt>
+                    <dd>{String(value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
           </section>
-          <section className="panel reviews">
+          <section className="panel reviews" id="reviews">
+            {!p.can_review && (
+              <p className="notice">
+                Only logged-in buyers who have placed an order for this product
+                using Buy Now can submit a review.
+              </p>
+            )}
             <h2>
               Peer reviews{" "}
               {reviews.length > 0 && (
@@ -457,7 +503,8 @@ function Details() {
             </h2>
             {!reviews.length && (
               <p>
-                No reviews yet. Buyers can review after starting a conversation.
+                No reviews yet. Buyers can review after placing an order with
+                Buy Now.
               </p>
             )}
             {reviews.map((r) => (
@@ -466,6 +513,18 @@ function Details() {
                 <div>
                   <b>{r.name}</b>
                   <small>{"★".repeat(r.rating)}</small>
+                  <span
+                    className="badge green"
+                    title={
+                      r.verified_purchase
+                        ? "This buyer placed an order for this product."
+                        : "Review submitted before purchase verification was introduced."
+                    }
+                  >
+                    {r.verified_purchase
+                      ? "✓ Verified purchase"
+                      : "Community review"}
+                  </span>
                   <p>{r.text}</p>
                   {(session?.id === r.buyer_id ||
                     session?.role === "admin") && (
@@ -486,7 +545,7 @@ function Details() {
                 </div>
               </div>
             ))}
-            {session?.role === "buyer" && (
+            {session?.role === "buyer" && p.can_review && (
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
@@ -551,16 +610,48 @@ function Details() {
             {p.location}
           </p>
           <span className="badge green">{p.status}</span>
+          <ProductOptions
+            product={p}
+            selection={selection}
+            onChange={setSelection}
+          />
+          <BuyNow key={p.id} product={p} selection={selection} onOrder={load} />
+          <AddToCart product={p} selection={selection} />
           <section className="panel seller-profile">
             <div className="avatar">{p.seller.slice(0, 2)}</div>
             <div>
-              <b>{p.seller}</b>
-              <small>
-                {p.verification_status === "verified"
-                  ? "✓ Verified Seller"
-                  : "Seller verification pending"}
-              </small>
+              <div className="seller-name-badge">
+                <b>{p.seller}</b>
+                <small>
+                  <span
+                    className={
+                      "badge " +
+                      (p.verification_status === "verified" ? "green" : "amber")
+                    }
+                  >
+                    {p.verification_status === "verified"
+                      ? "✓ Verified Seller"
+                      : "Not Verified"}
+                  </span>
+                </small>
+              </div>
             </div>
+            <p
+              className="seller-overall-rating"
+              aria-label={`Overall rating: ${p.seller_rating || "No ratings"} out of 5`}
+            >
+              <span className="rating">
+                {p.seller_review_count
+                  ? "★".repeat(Math.round(Number(p.seller_rating))) +
+                    "☆".repeat(5 - Math.round(Number(p.seller_rating)))
+                  : "☆☆☆☆☆"}
+              </span>
+              <br />
+              Overall Rating:{" "}
+              {p.seller_review_count
+                ? `${Number(p.seller_rating).toFixed(1)} / 5 (${p.seller_review_count} reviews)`
+                : "No reviews yet"}
+            </p>
           </section>
           <section className="panel chat">
             <div className="chat-heading">
@@ -624,7 +715,7 @@ function Details() {
                       sending ||
                       !draft.trim() ||
                       (isOwner && !buyer) ||
-                      p.status !== "active"
+                      p.status !== "approved"
                     }
                   >
                     <Send size={18} />
@@ -642,30 +733,6 @@ function Details() {
               product guarantee.
             </p>
           </div>
-          {session && (
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                try {
-                  await api("/listings/" + id + "/flag", {
-                    method: "POST",
-                    body: {
-                      reason: new FormData(e.currentTarget).get("reason"),
-                    },
-                  });
-                  notify("Report submitted");
-                } catch (e) {
-                  setError(e.message);
-                }
-              }}
-            >
-              <label className="mt-5">
-                Report a concern
-                <input name="reason" required minLength={5} maxLength={300} />
-              </label>
-              <button className="btn compact">Report listing</button>
-            </form>
-          )}
         </aside>
       </div>
     </main>
@@ -678,9 +745,11 @@ function Seller() {
     [error, setError] = useState(""),
     [conversations, setConversations] = useState([]);
   const location = useLocation();
+  const [orders, setOrders] = useState([]);
   async function load() {
     try {
       setMine(await api("/listings?mine=true"));
+      setOrders(await api("/orders"));
       setConversations(await api("/conversations"));
     } catch (e) {
       setError(e.message);
@@ -710,7 +779,7 @@ function Seller() {
       <div className="stats">
         <Stat
           label="Active listings"
-          value={mine.filter((p) => p.status === "active").length}
+          value={mine.filter((p) => p.status === "approved").length}
         />
         <Stat label="Sold items" value={sold.length} />
         <Stat
@@ -739,7 +808,10 @@ function Seller() {
                     <b>{p.title}</b>
                   </Link>
                 </td>
-                <td>{money(p.price)}</td>
+                <td>
+                  {money(p.price)}
+                  <FeePreview price={p.price} />
+                </td>
                 <td>
                   <span className="badge">{p.status}</span>
                 </td>
@@ -754,7 +826,7 @@ function Seller() {
                     </button>
                     <button
                       className="btn compact"
-                      disabled={p.status !== "active"}
+                      disabled={p.status !== "approved"}
                       onClick={async () => {
                         try {
                           await api("/listings/" + p.id + "/sold", {
@@ -792,8 +864,8 @@ function Seller() {
         </table>
         {!mine.length && (
           <div className="empty">
-            Create your first listing. It will remain a draft until you are
-            verified.
+            Complete all product details to publish your first listing
+            automatically.
           </div>
         )}
       </div>
@@ -811,17 +883,122 @@ function Seller() {
           <p>No inquiries yet.</p>
         )}
       </section>
+      <section className="panel mt-6">
+        <div className="section-title">
+          <h2>Buyer orders</h2>
+          <button className="btn compact" onClick={load}>
+            Refresh orders
+          </button>
+        </div>
+        {orders.length ? (
+          orders.map((o) => (
+            <div className="review" key={o.id}>
+              <div>
+                <Link to={"/listing/" + o.listing_id}>
+                  <b>{o.product_name}</b>
+                </Link>
+                <p>
+                  {o.buyer_name} | Quantity: {o.quantity} | {money(o.total)} |{" "}
+                  {o.payment_method}
+                </p>
+                <p>Delivery: {o.address}</p>
+                <p>
+                  Options:{" "}
+                  {Object.entries(o.selected_variants || {})
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(", ") || "Standard"}
+                </p>
+                <p>
+                  Platform fee (7%): {money(o.platform_fee)} | Net payout:{" "}
+                  {money(o.net_payout)}
+                </p>
+                <small>
+                  Order {o.id} | Payment: {o.payment_status}
+                </small>
+                <label>
+                  Order status
+                  <select
+                    value={o.status}
+                    onChange={async (e) => {
+                      try {
+                        await api("/orders/" + o.id + "/status", {
+                          method: "PATCH",
+                          body: { status: e.target.value },
+                        });
+                        await load();
+                        notify("Order status updated");
+                      } catch (e) {
+                        setError(e.message);
+                      }
+                    }}
+                  >
+                    {["Pending", "Confirmed", "Packing", "Delivered"].map(
+                      (status) => (
+                        <option
+                          key={status}
+                          disabled={
+                            status !== o.status &&
+                            !(
+                              o.status === "Pending" && status === "Confirmed"
+                            ) &&
+                            !(
+                              o.status === "Confirmed" && status === "Packing"
+                            ) &&
+                            !(o.status === "Packing" && status === "Delivered")
+                          }
+                        >
+                          {status}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                </label>
+              </div>
+            </div>
+          ))
+        ) : (
+          <p>No orders yet.</p>
+        )}
+      </section>
+      <section className="panel mt-6">
+        <h2>Sales &amp; listing exports</h2>
+        <p>
+          Sales exports include order totals and statuses. Payment collection is
+          not tracked.
+        </p>
+        <div className="actions">
+          {["sales", "listings"].flatMap((kind) =>
+            ["pdf", "csv"].map((format) => (
+              <button
+                className="btn"
+                key={kind + format}
+                onClick={() =>
+                  downloadReport(`seller/${kind}/${format}`).catch((e) =>
+                    setError(e.message),
+                  )
+                }
+              >
+                {kind} {format.toUpperCase()}
+              </button>
+            )),
+          )}
+        </div>
+      </section>
       <Reports role="seller" />
       {editing && (
-        <ListingForm
+        <ListingEditor
           item={editing}
           categories={categoryRows}
           onClose={() => setEditing(null)}
-          onSave={() => {
+          onSave={(result) => {
             setEditing(null);
             load();
             reload();
-            notify("Listing saved");
+            notify(
+              result.status === "approved"
+                ? "Listing approved and published"
+                : "Listing sent to admin approval",
+            );
           }}
         />
       )}
@@ -829,6 +1006,7 @@ function Seller() {
   );
 }
 function Verification() {
+  const [devOtp, setDevOtp] = useState(null);
   const [state, setState] = useState(null),
     [error, setError] = useState(""),
     [message, setMessage] = useState(""),
@@ -842,7 +1020,14 @@ function Verification() {
   }
   useEffect(() => {
     load();
+    window.addEventListener("nearbuy:verification", load);
+    return () => window.removeEventListener("nearbuy:verification", load);
   }, []);
+  useEffect(() => {
+    if (!devOtp) return;
+    const timer = setTimeout(() => setDevOtp(null), 600000);
+    return () => clearTimeout(timer);
+  }, [devOtp]);
   return (
     <section className="panel mb-6">
       <div className="section-title">
@@ -851,6 +1036,13 @@ function Verification() {
       </div>
       <ErrorBox error={error} />
       {message && <p role="status">{message}</p>}
+      {devOtp && (
+        <div className="dev-otp-preview" role="status">
+          <strong>Dev Mode OTP Preview</strong>
+          <code>{devOtp}</code>
+          <small>Enter this code below. Expires in 10 minutes.</small>
+        </div>
+      )}
       {state?.verification_note && <p>Admin note: {state.verification_note}</p>}
       {state?.verification_status === "verified" ? (
         <p>✓ Verified Seller — your eligible listings are public.</p>
@@ -861,20 +1053,23 @@ function Verification() {
       ) : (
         <>
           <p>
-            Submit your identity details, then confirm your phone number. Your
-            listings stay in draft until approval.
+            Confirm your phone and submit your identity for admin review. Your
+            listings display your verification status on Explore.
           </p>
           <form
             onSubmit={async (e) => {
               e.preventDefault();
               setBusy(true);
               setError("");
+              setDevOtp(null);
               try {
-                const d = Object.fromEntries(new FormData(e.currentTarget));
-                setMessage(
-                  (await api("/verification", { method: "POST", body: d }))
-                    .message,
-                );
+                const d = new FormData(e.currentTarget);
+                const result = await api("/verification", {
+                  method: "POST",
+                  body: d,
+                });
+                setMessage(result.message);
+                setDevOtp(result.devOtp || null);
                 load();
               } catch (e) {
                 setError(e.message);
@@ -888,13 +1083,13 @@ function Verification() {
                 ID type
                 <select name="identity_type">
                   <option value="nic">Sri Lankan NIC</option>
-                  <option value="business">Business registration</option>
                 </select>
               </label>
               <label>
-                NIC / Business ID
+                NIC Number
                 <input
                   name="identity_number"
+                  defaultValue={state?.identity_number || ""}
                   required
                   minLength={5}
                   maxLength={40}
@@ -908,8 +1103,55 @@ function Verification() {
                 type="tel"
                 pattern="\+94[1-9][0-9]{8}"
                 placeholder="+94771234567"
+                defaultValue={state?.phone || ""}
                 required
               />
+            </label>
+            <label>
+              NIC Photo
+              <input
+                name="nic_photo"
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                required={!state?.has_nic_photo}
+              />
+              <small>
+                {state?.has_nic_photo
+                  ? "NIC photo saved. Upload only to replace it."
+                  : "JPEG, PNG or WebP, maximum 5 MB."}
+              </small>
+            </label>
+            <label>
+              Business Registration (BR) Number
+              <input
+                name="br_number"
+                minLength={3}
+                maxLength={70}
+                defaultValue={state?.br_number || ""}
+                required
+              />
+            </label>
+            <label>
+              BR Photo
+              <input
+                name="br_photo"
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                required
+              />
+              <small>
+                JPEG, PNG or WebP, maximum 5 MB. Private admin review only.
+              </small>
+            </label>
+            <label className="legal-agreement">
+              <input
+                type="checkbox"
+                name="legal_agreement"
+                value="agree"
+                required
+              />
+              I agree that illegal activity results in legal action and a
+              permanent account ban.
             </label>
             <button className="btn" disabled={busy}>
               Submit and send phone code
@@ -928,6 +1170,8 @@ function Verification() {
                     })
                   ).message,
                 );
+                setDevOtp(null);
+                setError("");
                 load();
               } catch (e) {
                 setError(e.message);
@@ -949,152 +1193,6 @@ function Verification() {
         </>
       )}
     </section>
-  );
-}
-function ListingForm({ item, categories, onClose, onSave }) {
-  const [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
-  async function submit(e) {
-    e.preventDefault();
-    const data = new FormData(e.currentTarget);
-    setBusy(true);
-    setError("");
-    try {
-      let images = (item.images || []).filter((i) => i.startsWith("/uploads/"));
-      const files = data.getAll("images").filter((f) => f.size);
-      if (files.length > 6) throw new Error("Maximum 6 images");
-      if (files.length) {
-        images = [];
-        for (const f of files) {
-          if (f.size > 5 * 1024 * 1024)
-            throw new Error("Images must be 5 MB or smaller");
-          const form = new FormData();
-          form.append("image", f);
-          images.push(
-            (await api("/uploads", { method: "POST", body: form })).url,
-          );
-        }
-      }
-      const b = {
-        title: data.get("title"),
-        description: data.get("description"),
-        price: Number(data.get("price")),
-        location: data.get("location"),
-        category_id: Number(data.get("category_id")),
-        condition: data.get("condition"),
-        images,
-      };
-      await api(item.id ? "/listings/" + item.id : "/listings", {
-        method: item.id ? "PUT" : "POST",
-        body: b,
-      });
-      onSave();
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <div className="modal-backdrop">
-      <section
-        className="modal panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="editor-title"
-      >
-        <div className="section-title">
-          <h2 id="editor-title">
-            {item.id ? "Edit listing" : "Create a local find"}
-          </h2>
-          <button className="icon-btn" aria-label="Close" onClick={onClose}>
-            <X />
-          </button>
-        </div>
-        <form onSubmit={submit}>
-          <label>
-            Title
-            <input
-              name="title"
-              required
-              minLength={3}
-              maxLength={100}
-              defaultValue={item.title}
-            />
-          </label>
-          <div className="form-row">
-            <label>
-              Price (LKR)
-              <input
-                type="number"
-                name="price"
-                min="1"
-                max="9999999999"
-                step="0.01"
-                required
-                defaultValue={item.price}
-              />
-            </label>
-            <label>
-              Category
-              <select name="category_id" defaultValue={item.category_id}>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="form-row">
-            <label>
-              Location
-              <input
-                name="location"
-                minLength={2}
-                maxLength={60}
-                required
-                defaultValue={item.location}
-              />
-            </label>
-            <label>
-              Condition
-              <select name="condition" defaultValue={item.condition || "Good"}>
-                {["New", "Like new", "Good", "Fair"].map((c) => (
-                  <option key={c}>{c}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <label>
-            Images (up to 6; JPEG/PNG/WebP; 5 MB each)
-            <input
-              type="file"
-              name="images"
-              accept="image/jpeg,image/png,image/webp"
-              multiple
-            />
-            <small>
-              New uploads replace the existing gallery. Leave empty to keep it.
-            </small>
-          </label>
-          <label>
-            Description
-            <textarea
-              name="description"
-              required
-              minLength={15}
-              maxLength={2000}
-              defaultValue={item.description}
-            />
-          </label>
-          <ErrorBox error={error} />
-          <button className="btn primary full" disabled={busy}>
-            {busy ? "Saving…" : "Save listing"}
-          </button>
-        </form>
-      </section>
-    </div>
   );
 }
 function Stat({ label, value }) {
@@ -1175,6 +1273,7 @@ function Admin() {
     [error, setError] = useState("");
   const paths = {
     Verifications: "verifications",
+    "Listing approvals": "listing-approvals",
     Users: "users",
     "Flagged listings": "flags",
     "Audit logs": "audit",
@@ -1235,7 +1334,56 @@ function Admin() {
         ))}
       </div>
       <section className="panel table-wrap">
-        {tab === "Verifications" ? (
+        {tab === "Listing approvals" ? (
+          <div className="p-5">
+            {data.map((p) => (
+              <form
+                key={p.id}
+                className="panel mb-4"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const d = new FormData(e.currentTarget);
+                  action("/admin/listing-approvals/" + p.id, {
+                    decision: d.get("decision"),
+                    note: d.get("note"),
+                  });
+                }}
+              >
+                <h3>{p.title || "Untitled listing"}</h3>
+                <p>Seller: {p.seller}</p>
+                <p className="notice">
+                  Missing: {p.missing_details?.join(", ") || "None"}
+                </p>
+                <Link to={"/listing/" + p.id}>Inspect listing and photos</Link>
+                <p>{p.description || "No description"}</p>
+                <p>
+                  Size &amp; Weight: {p.size_weight || "Not provided"} |
+                  Category: {p.category || "Not provided"} | Condition:{" "}
+                  {p.condition || "Not provided"}
+                </p>
+                <p>
+                  Price: {p.price ? money(p.price) : "Not provided"} | Payment:{" "}
+                  {p.payment_methods?.join(", ") || "Not provided"}
+                </p>
+                <label>
+                  Decision
+                  <select name="decision">
+                    <option value="approved">Approve</option>
+                    <option value="removed">Reject and remove</option>
+                  </select>
+                </label>
+                <label>
+                  Decision note
+                  <input name="note" minLength={3} maxLength={300} required />
+                </label>
+                <button className="btn primary">Save decision</button>
+              </form>
+            ))}
+            {!data.length && (
+              <p className="empty">No listings awaiting approval.</p>
+            )}
+          </div>
+        ) : tab === "Verifications" ? (
           <div className="p-5">
             {data.map((u) => (
               <form
@@ -1260,6 +1408,29 @@ function Admin() {
                   Phone: {u.phone} ·{" "}
                   {u.phone_verified ? "Confirmed" : "Unconfirmed"}
                 </p>
+                <p>BR Number: {u.br_number || "Not provided"}</p>
+                <p>
+                  Category: {u.product_category || "Not provided"} | District:{" "}
+                  {u.district || "Not provided"}
+                </p>
+                <p>Address: {u.address || "Not provided"}</p>
+                <p>
+                  Seller terms:{" "}
+                  {u.seller_terms_at ? "Agreed" : "Legacy account"} | Legal
+                  agreement: {u.legal_agreement_at ? "Agreed" : "Not recorded"}
+                </p>
+                <div className="identity-documents">
+                  <IdentityDocument
+                    userId={u.id}
+                    kind="nic"
+                    available={u.has_nic_photo}
+                  />
+                  <IdentityDocument
+                    userId={u.id}
+                    kind="br"
+                    available={u.has_br_photo}
+                  />
+                </div>
                 <label>
                   Decision
                   <select name="decision">
@@ -1454,5 +1625,49 @@ function Admin() {
       </section>
       <Reports role="admin" />
     </main>
+  );
+}
+
+function IdentityDocument({ userId, kind, available }) {
+  const [image, setImage] = useState(null),
+    [error, setError] = useState(""),
+    [busy, setBusy] = useState(false);
+  return (
+    <div>
+      <button
+        className="btn"
+        type="button"
+        disabled={!available || busy}
+        onClick={async () => {
+          if (image) {
+            setImage(null);
+            return;
+          }
+          setBusy(true);
+          setError("");
+          try {
+            setImage(
+              (await api(`/admin/verifications/${userId}/documents/${kind}`))
+                .image,
+            );
+          } catch (e) {
+            setError(e.message);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "Loading..." : image ? "Hide" : available ? "Inspect" : "No"}{" "}
+        {kind.toUpperCase()} photo
+      </button>
+      <ErrorBox error={error} />
+      {image && (
+        <img
+          className="identity-photo"
+          src={image}
+          alt={`${kind.toUpperCase()} document submitted for verification`}
+        />
+      )}
+    </div>
   );
 }

@@ -1,1 +1,1 @@
-export const money = (n) => "Rs. " + Number(n).toLocaleString("en-LK");
+export const money = (n) => n == null ? "Price not provided" : "Rs. " + Number(n).toLocaleString("en-LK");

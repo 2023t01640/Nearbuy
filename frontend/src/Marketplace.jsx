@@ -1,3 +1,4 @@
+import { districts } from "./Registration";
 import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -12,7 +13,13 @@ import {
   MessageCircle,
   Star,
   LayoutGrid,
-  Bike,
+  Car,
+  Building2,
+  Wrench,
+  PawPrint,
+  Sprout,
+  Utensils,
+  Package,
   Armchair,
   Smartphone,
   Shirt,
@@ -21,15 +28,38 @@ import {
 } from "lucide-react";
 import { useApp } from "./context";
 import { money } from "./data";
-const icons = [
-  LayoutGrid,
-  Smartphone,
-  Armchair,
-  Bike,
-  Shirt,
-  Dumbbell,
-  BookOpen,
-];
+const normalizeCategory = (category) =>
+  String(category ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[-_/]+/g, " ")
+    .replace(/\s+/g, " ");
+
+// Categories come from the API in alphabetical order, so icons follow names,
+// never array positions. Unknown/admin-created categories use a neutral grid.
+const categoryIcons = new Map(
+  [
+    [Smartphone, ["electronics", "electric items", "electrical items"]],
+    [Armchair, ["furniture", "home and living", "home living"]],
+    [Car, ["vehicles", "vehicle", "motors", "cars"]],
+    [Building2, ["property", "real estate", "properties"]],
+    [Shirt, ["fashion", "clothing", "clothes"]],
+    [BookOpen, ["books and hobbies", "books hobbies", "books", "education"]],
+    [Dumbbell, ["sports", "fitness"]],
+    [Wrench, ["services", "tools"]],
+    [PawPrint, ["pets"]],
+    [Sprout, ["agriculture", "pets and agriculture", "pets agriculture"]],
+    [Utensils, ["food", "groceries", "food and groceries", "food groceries"]],
+    [LayoutGrid, ["all", "all items", "all categories"]],
+    [Package, ["other", "others"]],
+  ].flatMap(([icon, names]) =>
+    names.map((name) => [normalizeCategory(name), icon]),
+  ),
+);
+const categoryIcon = (category) =>
+  categoryIcons.get(normalizeCategory(category)) || LayoutGrid;
+
 export function Home() {
   const { listings, saved, categories } = useApp();
   const [query, setQuery] = useState(""),
@@ -40,10 +70,10 @@ export function Home() {
   const items = listings
     .filter(
       (p) =>
-        p.status === "active" &&
+        p.status === "approved" &&
         (!onlySaved || saved.includes(p.id)) &&
         (category === "All items" || p.category === category) &&
-        (location === "All Sri Lanka" || p.location === location) &&
+        (location === "All Sri Lanka" || p.district === location) &&
         (p.title + " " + p.description + " " + p.location)
           .toLowerCase()
           .includes(query.toLowerCase()),
@@ -124,7 +154,7 @@ export function Home() {
             onChange={(e) => setLocation(e.target.value)}
           >
             <option>All Sri Lanka</option>
-            {[...new Set(listings.map((p) => p.location))].map((l) => (
+            {districts.map((l) => (
               <option key={l}>{l}</option>
             ))}
           </select>
@@ -139,8 +169,8 @@ export function Home() {
           <span>A little bit of everything, nearby.</span>
         </div>
         <div className="categories">
-          {categories.map((c, i) => {
-            const Icon = icons[i] || LayoutGrid;
+          {categories.map((c) => {
+            const Icon = categoryIcon(c);
             return (
               <button
                 key={c}
@@ -283,7 +313,18 @@ function Card({ p }) {
           {p.location}
         </span>
         <span>
-          {p.verification_status === "verified" ? "✓ Verified seller" : ""}
+          <span
+            className={
+              "badge " +
+              (p.verification_status === "verified" ? "green" : "amber")
+            }
+          >
+            {p.verification_status === "verified"
+              ? "✓ Verified Seller"
+              : p.verification_status === "pending"
+                ? "Pending Verification"
+                : "Unverified Seller"}
+          </span>
         </span>
       </div>
     </article>
